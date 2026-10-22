@@ -1,6 +1,6 @@
 # secrets
 .admin-secret
-.codex-pages-admin-password
+.pages-admin-password
 
 # runtime data & published projects
 projects/

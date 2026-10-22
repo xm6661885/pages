@@ -3,7 +3,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-Codex Pages 是一个自托管的网页发布门户，用于集中托管静态页面，并代理运行 WSGI/ASGI 项目。项目本身使用 Python 标准库实现 HTTP 服务、管理 UI 和 CLI；ASGI 子项目由其自身依赖提供 `uvicorn`。
+Pages 是一个自托管的网页发布门户，用于集中托管静态页面，并代理运行 WSGI/ASGI 项目。项目本身使用 Python 标准库实现 HTTP 服务、管理 UI 和 CLI；ASGI 子项目由其自身依赖提供 `uvicorn`。
 
 ## 常用命令
 
@@ -33,7 +33,7 @@ Codex Pages 是一个自托管的网页发布门户，用于集中托管静态�
 - `portal.py` 同时承载门户 HTTP 服务、管理页面、发布 CLI 和代理逻辑。`Handler` 分派首页、管理路由和 `/p/<endpoint>/...`；静态项目从项目的 `code/` 目录读文件，动态项目按需启动后端并通过 loopback HTTP 转发请求及查询字符串。
 - 每个已发布项目位于 `projects/<endpoint>/`，由 `project.json` 描述名称、类型、可见状态和 WSGI/ASGI 导入目标；实际项目文件放在 `code/`。门户首页只列出启用且 `show_on_home` 不为 false 的项目，路由也会拒绝服务已停用项目。
 - 动态服务进程以项目 `code/` 为工作目录，状态和日志分别写入 `runtime/<endpoint>.json` 与 `runtime/<endpoint>.log`。WSGI 由 `wsgi_runner.py` 使用标准库 `wsgiref` 启动；ASGI 由 `asgi_runner.py` 通过 `uvicorn` 启动。两个 runner 均绑定 `127.0.0.1`，外部请求由门户代理。
-- 管理认证使用仓库根目录的 `.codex-pages-admin-password` 作为密码来源，登录后以签名 cookie 会话认证。上传 HTML 的管理路由会在项目目录中创建静态项目及其元数据。
+- 管理认证使用仓库根目录的 `.pages-admin-password` 作为密码来源，登录后以签名 cookie 会话认证。上传 HTML 的管理路由会在项目目录中创建静态项目及其元数据。
 - `asgi_runner.py` 与 `wsgi_runner.py` 是子项目进程入口，不是门户的部署/启动入口；门户命令由 `portal.py` 的 argparse CLI 提供。
 
 ## 仓库特有约定与易踩的坑

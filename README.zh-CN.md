@@ -1,4 +1,4 @@
-# Codex Pages
+# Pages
 
 [English](README.md) | **简体中文**
 
@@ -7,6 +7,7 @@
 ## 功能特性
 
 - **静态站点**：发布整个目录或单个 `.html` 文件，访问路径为 `/p/<endpoint>/`。
+- **PWA**：以 `--type pwa` 发布包含 manifest 和 Service Worker 的静态目录，自动适配 manifest 的站点根路径。
 - **WSGI 应用**：通过 `wsgiref` 运行任意 WSGI 对象，由门户反向代理。
 - **ASGI 应用**：通过 `uvicorn` 运行 FastAPI / Starlette 等（`uvicorn` 由子项目自己的环境提供）。
 - **按需启动后端**：动态应用在首次请求时才启动，仅绑定 `127.0.0.1`，状态与日志写入 `runtime/`。
@@ -25,8 +26,8 @@
 ## 快速开始
 
 ```bash
-git clone https://github.com/xm6661885/codex-pages.git
-cd codex-pages
+git clone https://github.com/xm6661885/pages.git
+cd pages
 
 python3 portal.py init      # 生成管理密码并打印
 python3 portal.py run       # 在配置端口前台运行
@@ -40,7 +41,7 @@ python3 portal.py run       # 在配置端口前台运行
 python3 portal.py install-service --port 8765
 ```
 
-该命令从首选端口开始向上寻找空闲端口并写入 `config.json`，生成 `~/.config/systemd/user/codex-pages.service`，然后执行 `systemctl --user enable --now codex-pages.service`。如需退出登录后继续运行：`loginctl enable-linger $USER`。
+该命令从首选端口开始向上寻找空闲端口并写入 `config.json`，生成 `~/.config/systemd/user/pages.service`，然后执行 `systemctl --user enable --now pages.service`。如需退出登录后继续运行：`loginctl enable-linger $USER`。
 
 ## 发布项目
 
@@ -51,6 +52,9 @@ python3 portal.py deploy ./site --name "站点名称" --type static
 # 单个 HTML 文件
 python3 portal.py deploy ./index.html --name "页面名称" --type static
 
+# PWA 目录
+python3 portal.py deploy ./pwa --name "应用名称" --endpoint my-app --type pwa
+
 # WSGI（模块:对象，默认 app:app）
 python3 portal.py deploy ./app --name "应用名称" --type wsgi --wsgi app:app
 
@@ -58,12 +62,27 @@ python3 portal.py deploy ./app --name "应用名称" --type wsgi --wsgi app:app
 python3 portal.py deploy ./app --name "应用名称" --type asgi --asgi app:app
 ```
 
-可选参数：`--description`、`--endpoint`（自定义 URL 端点）、`--type auto|static|wsgi|asgi`。
+可选参数：`--description`、`--endpoint`（自定义 URL 端点）、`--type auto|static|pwa|wsgi|asgi`。
 
 - 未指定端点时由 `--name` 生成，须匹配 `[a-z0-9-]{1,63}`（以字母或数字开头）。名称为中文等非 ASCII 字符时，请显式传入 `--endpoint`。
 - `deploy` 会把源项目**复制**到 `projects/<endpoint>/code/`，不会在原目录直接运行。端点已存在时会拒绝发布，需先删除。
 - `--type auto` 只是简单启发式（`app.py` 含 `fastapi` → ASGI，其他 `app.py` → WSGI，否则静态），重要场景请显式指定 `--type`。
 - 发布后可通过 `http://[<本机IPv6>]:<端口>/p/<endpoint>/` 访问。
+
+### 发布 PWA
+
+PWA 目录须包含 `index.html`、根目录下的 `manifest.webmanifest` 或 `manifest.json`，以及根目录下的 `sw.js` 或 `service-worker.js`。manifest 必须包含 `name`。页面需用相对路径引用 manifest 并注册 Service Worker，例如：
+
+```html
+<link rel="manifest" href="./manifest.webmanifest">
+<script>
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js');
+</script>
+```
+
+发布时会在副本中补齐 manifest 的 `start_url`、`scope`、`id`，并将 `start_url`、`scope`、`id`、图标 `src` 中以 `/` 开头的本站路径改为 `/p/<endpoint>/` 下的路径；源目录不变。Service Worker 文件位于项目根目录时，默认作用域就是 `/p/<endpoint>/`。门户以 `application/manifest+json` 提供 `.webmanifest`，并让 manifest 和 Service Worker 每次使用前可重新验证缓存。
+
+**浏览器安装和 Service Worker 需要 HTTPS 或 localhost。** 门户本身只提供 HTTP；对外发布 PWA 时，请在门户前配置 HTTPS 反向代理，并使用代理的 HTTPS 地址访问。CLI 输出的 IPv6 HTTP 地址适合检查页面文件，不能用于验证安装和离线能力。HTML、CSS、JavaScript 中的站点根路径不会自动改写，请使用相对路径。
 
 ### 命令参考
 
@@ -80,7 +99,7 @@ python3 portal.py deploy ./app --name "应用名称" --type asgi --asgi app:app
 
 ## 管理页面
 
-访问 `/admin/`，使用 `init` 输出的密码登录（保存在 `.codex-pages-admin-password`）。可以：
+访问 `/admin/`，使用 `init` 输出的密码登录（保存在 `.pages-admin-password`）。可以：
 
 - 上传 `.html` / `.htm` 文件（非空，≤ 5 MiB），自动创建为新的静态项目，端点由文件名生成并保证唯一；
 - 修改显示名称和简介；
@@ -105,7 +124,7 @@ asgi_runner.py     ASGI 子项目入口
 config.json        监听端口，如 {"port": 8766}
 projects/<slug>/   project.json + code/             （运行时数据，已被 git 忽略）
 runtime/           <slug>.json 状态、<slug>.log 日志  （运行时数据，已被 git 忽略）
-.codex-pages-admin-password                         （机密，已被 git 忽略）
+.pages-admin-password                         （机密，已被 git 忽略）
 ```
 
 `project.json` 字段：`slug`、`name`、`description`、`type`、`wsgi`、`asgi`、`enabled`、`show_on_home`、`created_at`。
@@ -115,7 +134,7 @@ runtime/           <slug>.json 状态、<slug>.log 日志  （运行时数据，
 - 管理认证为单一共享密码，使用 HMAC 签名、`HttpOnly`、`SameSite=Strict` 的 cookie，约一天有效。服务使用明文 HTTP 且 cookie 未设置 `Secure`，**若暴露到公网，请放在 HTTPS 反向代理（Caddy、nginx 等）之后**。
 - 发布的 WSGI/ASGI 代码以与门户相同的系统用户运行，没有沙箱，请只部署可信代码。
 - 门户绑定所有网卡（`::`），如需保持私有请配置防火墙。
-- 切勿提交 `.codex-pages-admin-password`，仓库已将其忽略。
+- 切勿提交 `.pages-admin-password`，仓库已将其忽略。
 
 ## 已知限制
 

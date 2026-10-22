@@ -1,4 +1,4 @@
-# Codex Pages
+# Pages
 
 **English** | [简体中文](README.zh-CN.md)
 
@@ -7,6 +7,7 @@ A tiny, self-hosted publishing portal. Drop in a static page, a WSGI app or an A
 ## Features
 
 - **Static sites** – publish a directory or a single `.html` file, served from `/p/<endpoint>/`.
+- **PWAs** – publish a static directory with a manifest and service worker using `--type pwa`; local root paths in the manifest are adapted to the project URL.
 - **WSGI apps** – run any WSGI callable via `wsgiref`, reverse-proxied by the portal.
 - **ASGI apps** – run FastAPI / Starlette / etc. via `uvicorn` (provided by the sub-project's own environment).
 - **Lazy backends** – dynamic apps are started on the first request, bound to `127.0.0.1` only, with state and logs under `runtime/`.
@@ -25,8 +26,8 @@ A tiny, self-hosted publishing portal. Drop in a static page, a WSGI app or an A
 ## Quick start
 
 ```bash
-git clone https://github.com/xm6661885/codex-pages.git
-cd codex-pages
+git clone https://github.com/xm6661885/pages.git
+cd pages
 
 python3 portal.py init      # creates the admin password and prints it
 python3 portal.py run       # foreground server on the configured port
@@ -40,7 +41,7 @@ Open the printed URL (`python3 portal.py url` prints it again). The port comes f
 python3 portal.py install-service --port 8765
 ```
 
-This picks the first free port starting at the preferred one, writes it to `config.json`, creates `~/.config/systemd/user/codex-pages.service`, then runs `systemctl --user enable --now codex-pages.service`. To keep it running after logout: `loginctl enable-linger $USER`.
+This picks the first free port starting at the preferred one, writes it to `config.json`, creates `~/.config/systemd/user/pages.service`, then runs `systemctl --user enable --now pages.service`. To keep it running after logout: `loginctl enable-linger $USER`.
 
 ## Deploying projects
 
@@ -51,6 +52,9 @@ python3 portal.py deploy ./site --name "My Site" --type static
 # a single HTML file
 python3 portal.py deploy ./index.html --name "Landing Page" --type static
 
+# PWA directory
+python3 portal.py deploy ./pwa --name "My App" --endpoint my-app --type pwa
+
 # WSGI (module:object, default app:app)
 python3 portal.py deploy ./app --name "Flask Demo" --type wsgi --wsgi app:app
 
@@ -58,12 +62,27 @@ python3 portal.py deploy ./app --name "Flask Demo" --type wsgi --wsgi app:app
 python3 portal.py deploy ./app --name "API" --type asgi --asgi app:app
 ```
 
-Options: `--description`, `--endpoint` (custom URL slug), `--type auto|static|wsgi|asgi`.
+Options: `--description`, `--endpoint` (custom URL slug), `--type auto|static|pwa|wsgi|asgi`.
 
 - The endpoint is derived from `--name` if omitted; it must match `[a-z0-9-]{1,63}` (starting with a letter or digit). For non-ASCII names pass `--endpoint` explicitly.
 - `deploy` **copies** the source into `projects/<endpoint>/code/`; the original directory is never run in place. Re-deploying an existing endpoint is refused — delete it first.
-- `--type auto` is only a heuristic (`app.py` containing `fastapi` → ASGI, other `app.py` → WSGI, otherwise static). Pass `--type` explicitly when it matters.
+- `--type auto` is only a heuristic (`app.py` containing `fastapi` → ASGI, other `app.py` → WSGI, otherwise static). Pass `--type pwa` for a PWA.
 - The published project is then available at `http://[<host-ipv6>]:<port>/p/<endpoint>/`.
+
+### Publishing a PWA
+
+The directory must contain `index.html`, either `manifest.webmanifest` or `manifest.json` at its root, and either `sw.js` or `service-worker.js` at its root. The manifest needs a `name`. Link the manifest and register the worker using paths relative to the page:
+
+```html
+<link rel="manifest" href="./manifest.webmanifest">
+<script>
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js');
+</script>
+```
+
+Deployment fills in missing `start_url`, `scope`, and `id` values in the copied manifest. It maps local root paths in `start_url`, `scope`, `id`, and icon `src` values under `/p/<endpoint>/`. The source directory stays unchanged. A worker at the project root has `/p/<endpoint>/` as its default scope. The server sends `.webmanifest` as `application/manifest+json` and asks clients to revalidate the manifest and worker cache.
+
+**Installation and service workers require HTTPS or localhost.** The portal itself serves HTTP. Put an HTTPS reverse proxy in front of it for PWA use, and visit the proxy's HTTPS URL. The IPv6 HTTP URL printed by the CLI is useful for checking files but cannot validate installation or offline behavior. Root paths in HTML, CSS, and JavaScript are not rewritten; use relative paths there.
 
 ### CLI reference
 
@@ -80,7 +99,7 @@ Options: `--description`, `--endpoint` (custom URL slug), `--type auto|static|ws
 
 ## Admin UI
 
-Visit `/admin/` and sign in with the password from `init` (stored in `.codex-pages-admin-password`). From there you can:
+Visit `/admin/` and sign in with the password from `init` (stored in `.pages-admin-password`). From there you can:
 
 - upload a `.html` / `.htm` file (non-empty, ≤ 5 MiB) — it becomes a new static project, with a unique endpoint derived from the filename;
 - edit display name and description;
@@ -105,7 +124,7 @@ asgi_runner.py     entry point for ASGI sub-projects
 config.json        listening port, e.g. {"port": 8766}
 projects/<slug>/   project.json + code/            (runtime data, git-ignored)
 runtime/           <slug>.json state, <slug>.log   (runtime data, git-ignored)
-.codex-pages-admin-password                        (secret, git-ignored)
+.pages-admin-password                        (secret, git-ignored)
 ```
 
 `project.json` fields: `slug`, `name`, `description`, `type`, `wsgi`, `asgi`, `enabled`, `show_on_home`, `created_at`.
@@ -115,7 +134,7 @@ runtime/           <slug>.json state, <slug>.log   (runtime data, git-ignored)
 - Admin auth is a single shared password with an HMAC-signed, `HttpOnly`, `SameSite=Strict` cookie valid for about a day. The server speaks plain HTTP and the cookie is not marked `Secure` — **put it behind an HTTPS reverse proxy (Caddy, nginx, …) if exposed to the internet**.
 - Published WSGI/ASGI code runs as the same OS user as the portal with no sandbox. Only deploy code you trust.
 - The portal binds to all interfaces (`::`). Firewall it if it should stay private.
-- Never commit `.codex-pages-admin-password`; it is git-ignored.
+- Never commit `.pages-admin-password`; it is git-ignored.
 
 ## Limitations
 

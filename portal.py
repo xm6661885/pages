@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Codex Pages: a small self-hosted launcher for static pages and WSGI apps."""
+"""Pages: a small self-hosted launcher for static pages and WSGI apps."""
 from __future__ import annotations
 
 import argparse, base64, hashlib, hmac, html, json, mimetypes, os, re, secrets
@@ -8,12 +8,59 @@ from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, quote, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit, urlunsplit
 
 ROOT = Path(__file__).resolve().parent
 PROJECTS, RUNTIME = ROOT / "projects", ROOT / "runtime"
-CONFIG, SECRET = ROOT / "config.json", ROOT / ".codex-pages-admin-password"
+CONFIG, SECRET = ROOT / "config.json", ROOT / ".pages-admin-password"
 SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+mimetypes.add_type("application/manifest+json", ".webmanifest")
+
+def prepare_pwa(code, slug):
+    """Validate a static PWA and adapt manifest URLs to its mounted path."""
+    if not (code / "index.html").is_file():
+        raise ValueError("PWA 目录必须包含 index.html")
+    manifests = [code / name for name in ("manifest.webmanifest", "manifest.json") if (code / name).is_file()]
+    if len(manifests) != 1:
+        raise ValueError("PWA 根目录须有且仅有一个 manifest.webmanifest 或 manifest.json")
+    if not any((code / name).is_file() for name in ("sw.js", "service-worker.js")):
+        raise ValueError("PWA 根目录必须包含 sw.js 或 service-worker.js")
+    manifest_path = manifests[0]
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("PWA manifest 不是有效的 UTF-8 JSON") from exc
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("name"), str) or not manifest["name"].strip():
+        raise ValueError("PWA manifest 必须包含非空的 name")
+    prefix = f"/p/{slug}/"
+
+    def mounted_url(value, field):
+        if not isinstance(value, str):
+            raise ValueError(f"PWA manifest 的 {field} 必须是 URL 字符串")
+        parts = urlsplit(value)
+        if parts.scheme or parts.netloc or value.startswith("//"):
+            raise ValueError(f"PWA manifest 的 {field} 必须是本站路径")
+        path = parts.path
+        if path.startswith("/") and not path.startswith(prefix):
+            path = prefix + path.lstrip("/")
+        if not urlsplit(urljoin(prefix, path)).path.startswith(prefix):
+            raise ValueError(f"PWA manifest 的 {field} 不能超出 /p/{slug}/")
+        return urlunsplit(("", "", path, parts.query, parts.fragment))
+
+    for key in ("start_url", "scope", "id"):
+        if key in manifest:
+            manifest[key] = mounted_url(manifest[key], key)
+    manifest.setdefault("start_url", "./")
+    manifest.setdefault("scope", "./")
+    manifest.setdefault("id", prefix)
+    icons = manifest.get("icons", [])
+    if not isinstance(icons, list):
+        raise ValueError("PWA manifest 的 icons 必须是数组")
+    for icon in icons:
+        if not isinstance(icon, dict) or "src" not in icon:
+            raise ValueError("PWA manifest 的 icons 项必须包含 src")
+        icon["src"] = mounted_url(icon["src"], "icons.src")
+    save(manifest_path, manifest)
 
 def load(path, default=None):
     try:
@@ -89,9 +136,13 @@ def start_backend(slug, directory, meta):
     log = open(RUNTIME / f"{slug}.log", "ab")
     proc = subprocess.Popen(cmd, cwd=directory, stdout=log, stderr=log, start_new_session=True)
     save(RUNTIME / f"{slug}.json", {"pid": proc.pid, "port": port})
-    for _ in range(20):
-        time.sleep(.05)
-        if running(slug): return port
+    # Wait until the backend actually accepts connections; cold starts on slow hosts take seconds.
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        if proc.poll() is not None: break
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=.5): return port
+        except OSError: time.sleep(.2)
     stop_backend(slug); raise RuntimeError("backend failed to start; see runtime log")
 
 PAGE_CSS = '''
@@ -292,10 +343,10 @@ def mascot(sad=False):
     mouth = "M53 80q7-7 14 0" if sad else "M53 75q7 7 14 0"
     return f'''<svg class="mascot" viewBox="0 0 120 120" aria-hidden="true"><g class="m-sprout"><path class="m-stem" d="M60 26V12"/><path class="m-leaf" d="M60 14c2-9 10-13 18-11-2 8-9 12-18 11z"/><path class="m-leaf" d="M60 16c-3-7-10-10-16-8 2 6 8 9 16 8z"/></g><path class="m-body" d="M60 24c30 0 50 22 50 50 0 27-20 40-50 40S10 101 10 74c0-28 20-50 50-50z"/><ellipse class="m-shine" cx="36" cy="46" rx="9" ry="5" transform="rotate(-30 36 46)"/><g class="m-eyes"><ellipse cx="46" cy="66" rx="5" ry="6.2"/><ellipse cx="74" cy="66" rx="5" ry="6.2"/></g><circle class="m-glint" cx="47.8" cy="63.6" r="1.7"/><circle class="m-glint" cx="75.8" cy="63.6" r="1.7"/><ellipse class="m-cheek" cx="35" cy="78" rx="7" ry="4.2"/><ellipse class="m-cheek" cx="85" cy="78" rx="7" ry="4.2"/><path class="m-mouth" d="{mouth}"/><g class="m-paws"><ellipse cx="44" cy="106" rx="10" ry="8"/><ellipse cx="76" cy="106" rx="10" ry="8"/></g></svg>'''
 def page(title, content):
-    return f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="theme-color" content="#fff7f0"><title>{html.escape(title)} · Codex Pages</title><link rel="icon" href="{LOGO_ICON_HREF}"><style>{PAGE_CSS}</style></head><body><div class="ambient" aria-hidden="true"><i class="blob b1"></i><i class="blob b2"></i><i class="blob b3"></i><span class="spark s1">✦</span><span class="spark s2">✿</span><span class="spark s3">✦</span><span class="spark s4">♡</span></div><main class="shell">{content}</main><script>{PAGE_JS}</script></body></html>'''
+    return f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="theme-color" content="#fff7f0"><title>{html.escape(title)} · Pages</title><link rel="icon" href="{LOGO_ICON_HREF}"><style>{PAGE_CSS}</style></head><body><div class="ambient" aria-hidden="true"><i class="blob b1"></i><i class="blob b2"></i><i class="blob b3"></i><span class="spark s1">✦</span><span class="spark s2">✿</span><span class="spark s3">✦</span><span class="spark s4">♡</span></div><main class="shell">{content}</main><script>{PAGE_JS}</script></body></html>'''
 def topbar(admin=False):
     nav = "" if admin else '<a class="nav-link" href="/admin/">管理</a>'
-    return f'''<header class="topbar"><a class="brand" href="/"><span class="logo">{LOGO_SVG}</span><span>Codex Pages</span></a>{nav}</header>'''
+    return f'''<header class="topbar"><a class="brand" href="/"><span class="logo">{LOGO_SVG}</span><span>Pages</span></a>{nav}</header>'''
 def notice(title, detail="", extra="", sad=True):
     return f'''<div class="empty rise">{mascot(sad)}<strong>{title}</strong>{detail}{extra}</div>'''
 def login_page(error=False):
@@ -308,7 +359,7 @@ class App(ThreadingHTTPServer):
     allow_reuse_address = True
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "CodexPages/1.0"
+    server_version = "Pages/1.0"
     def log_message(self, fmt, *args): print(f"[{self.log_date_time_string()}] {fmt % args}")
     def cookies(self):
         c = SimpleCookie(); c.load(self.headers.get("Cookie", "")); return c
@@ -357,7 +408,7 @@ class Handler(BaseHTTPRequestHandler):
     def home(self):
         shown = [m for _,m in projects() if m.get("enabled") and m.get("show_on_home", True)]
         cards = "".join(f'''<a class="card rise tint-{i % 6}" style="--i:{i}" href="/p/{quote(m["slug"] )}/"><div class="card-top"><span class="avatar" aria-hidden="true">{html.escape(m["name"][:1].upper())}</span><span class="arrow">→</span></div><h2>{html.escape(m["name"])}</h2><p>{html.escape(m.get("description", "") or "点击打开项目")}</p><span class="slug">/{html.escape(m["slug"])}</span></a>''' for i,m in enumerate(shown))
-        body=topbar()+f'''<section class="hero"><div class="hero-text rise"><span class="eyebrow">Deployment portal</span><h1><span class="hl">已部署项目</span></h1><p>集中查看和访问已发布的网页、工具与小游戏。</p></div>{mascot()}</section><section class="grid">{cards or notice("暂无已发布项目", "<small>完成项目后，可通过管理页面上传 HTML，或使用 codex-pages deploy 发布。</small>", sad=False)}</section>'''
+        body=topbar()+f'''<section class="hero"><div class="hero-text rise"><span class="eyebrow">Deployment portal</span><h1><span class="hl">已部署项目</span></h1><p>集中查看和访问已发布的网页、工具与小游戏。</p></div>{mascot()}</section><section class="grid">{cards or notice("暂无已发布项目", "<small>完成项目后，可通过管理页面上传 HTML，或使用 pages deploy 发布。</small>", sad=False)}</section>'''
         self.send_html(page("项目首页", body))
     def admin(self, path):
         if path == "/admin/login" and self.command == "POST":
@@ -384,18 +435,22 @@ class Handler(BaseHTTPRequestHandler):
             rows.append(f'''<section class="card project rise tint-{i % 6}" style="--i:{i}"><div class="project-head"><span class="avatar" aria-hidden="true">{html.escape(m['name'][:1].upper())}</span><div class="project-title"><h2 class="project-name">{html.escape(m['name'])}</h2><a class="endpoint" href="/p/{quote(m['slug'])}/" target="_blank" rel="noopener">/p/{slug}/</a><span class="kind">{html.escape(m['type']).upper()}</span></div><span class="status{off}">{state}</span></div><form id="edit-{slug}" method="post" action="/admin/edit"><input type="hidden" name="slug" value="{slug}"><div class="edit-grid"><label class="field wide"><span class="label">显示名称</span><input name="name" value="{html.escape(m['name'], quote=True)}" required></label><label class="field wide"><span class="label">简介</span><input name="description" value="{html.escape(m.get('description',''), quote=True)}" placeholder="用一句话介绍这个项目"></label><label class="field"><span class="label">状态</span><span class="toggle">对外开放<input type="checkbox" role="switch" name="enabled" {checked}></span></label><label class="field"><span class="label">主页展示</span><span class="toggle">在主页列出<input type="checkbox" role="switch" name="show_on_home" {shown}></span></label></div></form><div class="actions"><button class="save" type="submit" form="edit-{slug}">保存更改</button><form class="inline" method="post" action="/admin/delete" data-confirm="删除此项目及全部文件？" data-name="{html.escape(m['name'], quote=True)}"><input type="hidden" name="slug" value="{slug}"><button class="danger" type="submit">删除项目</button></form></div></section>''')
         upload=f'''<section class="card upload rise"><div><span class="eyebrow">Quick publish</span><h2>上传 HTML 页面</h2><p>选择一个 .html 文件，系统会为它创建独立项目目录和新端点。</p></div><form method="post" action="/admin/upload" enctype="multipart/form-data"><label class="drop"><input type="file" name="file" accept=".html,.htm,text/html" required><span class="drop-icon">{UPLOAD_ICON}</span><span class="drop-name"></span></label><button type="submit">上传并发布</button></form></section>'''
         dialog=f'''<dialog class="modal" id="confirm-delete"><form method="dialog" class="modal-card">{mascot(sad=True)}<h3>删除此项目及全部文件？</h3><p class="modal-target"></p><div class="modal-actions"><button class="ghost" value="cancel">取消</button><button class="danger solid" value="ok">删除项目</button></div></form></dialog>'''
-        body=topbar(admin=True)+'''<div class="dashboard-head rise"><div><span class="eyebrow">Deployment management</span><h1>部署管理</h1></div><a class="nav-link" href="/">返回主页</a></div>'''+upload+'<section class="grid projects">'+"".join(rows or [notice("暂无项目", "<small>上传 HTML 文件，或使用 <code>codex-pages deploy</code> 发布项目。</small>", sad=False)])+"</section>"+dialog
+        body=topbar(admin=True)+'''<div class="dashboard-head rise"><div><span class="eyebrow">Deployment management</span><h1>部署管理</h1></div><a class="nav-link" href="/">返回主页</a></div>'''+upload+'<section class="grid projects">'+"".join(rows or [notice("暂无项目", "<small>上传 HTML 文件，或使用 <code>pages deploy</code> 发布项目。</small>", sad=False)])+"</section>"+dialog
         self.send_html(page("部署管理", body))
     def serve_project(self, path):
         rest=path[3:]; slug, _, suffix=rest.partition("/"); p,m=project(slug)
         if not p or not m.get("enabled"): return self.send_error(404)
         code=p / "code"
-        if m["type"] == "static":
+        if m["type"] in ("static", "pwa"):
             target=(code / unquote(suffix or "index.html")).resolve()
-            if not str(target).startswith(str(code.resolve())): return self.send_error(403)
-            if target.is_dir(): target=target / "index.html"
+            if target.is_dir(): target=(target / "index.html").resolve()
+            try: target.relative_to(code.resolve())
+            except ValueError: return self.send_error(403)
             if not target.is_file(): return self.send_error(404)
-            data=target.read_bytes(); self.send_response(200); self.send_header("Content-Type", mimetypes.guess_type(target.name)[0] or "application/octet-stream"); self.send_header("Content-Length",str(len(data))); self.end_headers(); self.wfile.write(data); return
+            data=target.read_bytes(); self.send_response(200); self.send_header("Content-Type", mimetypes.guess_type(target.name)[0] or "application/octet-stream"); self.send_header("Content-Length",str(len(data)))
+            if m["type"] == "pwa" and target.name in ("sw.js", "service-worker.js", "manifest.webmanifest", "manifest.json"):
+                self.send_header("Cache-Control", "no-cache")
+            self.end_headers(); self.wfile.write(data); return
         try: port=start_backend(slug, code, m)
         except RuntimeError as e: return self.send_html(page("后端启动失败", topbar()+notice("后端启动失败", f"<pre>{html.escape(str(e))}</pre>")), 502)
         # Preserve the original query string when proxying to WSGI/ASGI apps.
@@ -434,8 +489,8 @@ def external_url(port, slug=None):
     return f"http://[{ip}]:{port}/" + (f"p/{slug}/" if slug else "")
 
 def cli():
-    ap=argparse.ArgumentParser(prog="codex-pages"); sub=ap.add_subparsers(dest="cmd",required=True)
-    d=sub.add_parser("deploy", help="复制一个静态站、WSGI 或 ASGI 项目并发布"); d.add_argument("source"); d.add_argument("--name",required=True); d.add_argument("--description",default=""); d.add_argument("--endpoint"); d.add_argument("--type",choices=("auto","static","wsgi","asgi"),default="auto"); d.add_argument("--wsgi",default="app:app"); d.add_argument("--asgi",default="app:app")
+    ap=argparse.ArgumentParser(prog="pages"); sub=ap.add_subparsers(dest="cmd",required=True)
+    d=sub.add_parser("deploy", help="复制一个静态站、PWA、WSGI 或 ASGI 项目并发布"); d.add_argument("source"); d.add_argument("--name",required=True); d.add_argument("--description",default=""); d.add_argument("--endpoint"); d.add_argument("--type",choices=("auto","static","pwa","wsgi","asgi"),default="auto"); d.add_argument("--wsgi",default="app:app"); d.add_argument("--asgi",default="app:app")
     sub.add_parser("list"); sub.add_parser("url"); sub.add_parser("init")
     rm=sub.add_parser("delete", help="删除已发布项目及其全部文件"); rm.add_argument("endpoint"); rm.add_argument("-y","--yes",action="store_true",help="跳过确认，直接删除")
     pwd=sub.add_parser("admin-password", help="修改管理密码（需要显式确认）"); pwd.add_argument("password"); pwd.add_argument("--confirm", action="store_true", help="确认修改管理密码")
@@ -444,9 +499,9 @@ def cli():
     PROJECTS.mkdir(exist_ok=True); RUNTIME.mkdir(exist_ok=True)
     if a.cmd=="init":
         if not SECRET.exists(): new_secret()
-        print(f"已初始化：{ROOT}\n管理密码：{secret()}\n请立即保存或使用 codex-pages admin-password 设置新密码。\n入口：{external_url(config().get('port',8765))}"); return
+        print(f"已初始化：{ROOT}\n管理密码：{secret()}\n请立即保存或使用 pages admin-password 设置新密码。\n入口：{external_url(config().get('port',8765))}"); return
     if a.cmd=="admin-password":
-        if not a.confirm: raise SystemExit("为防止自动化任务覆盖密码，请使用：codex-pages admin-password <新密码> --confirm")
+        if not a.confirm: raise SystemExit("为防止自动化任务覆盖密码，请使用：pages admin-password <新密码> --confirm")
         new_secret(a.password); print("管理密码已更新："+secret()); return
     if a.cmd=="deploy":
         src=Path(a.source).expanduser().resolve()
@@ -457,7 +512,14 @@ def cli():
         if dst.exists(): raise SystemExit(f"端点已存在：{slug}（请换 --endpoint）")
         source_text = (src / "app.py").read_text(errors="ignore").lower() if src.is_dir() and (src / "app.py").is_file() else ""
         typ = a.type if a.type != "auto" else ("asgi" if "fastapi" in source_text else "wsgi" if source_text else "static")
-        dst.mkdir(); code=dst/"code"; shutil.copytree(src,code) if src.is_dir() else (code.mkdir(), shutil.copy2(src,code/"index.html"))
+        if typ == "pwa" and not src.is_dir(): raise SystemExit("PWA 必须发布整个目录")
+        dst.mkdir(); code=dst/"code"
+        try:
+            shutil.copytree(src,code) if src.is_dir() else (code.mkdir(), shutil.copy2(src,code/"index.html"))
+            if typ == "pwa": prepare_pwa(code, slug)
+        except (OSError, ValueError) as exc:
+            shutil.rmtree(dst)
+            raise SystemExit(f"发布失败：{exc}") from exc
         save(dst/"project.json", {"slug":slug,"name":a.name,"description":a.description,"type":typ,"wsgi":a.wsgi,"asgi":a.asgi,"enabled":True,"show_on_home":True,"created_at":int(time.time())})
         print("已发布："+external_url(config().get('port',8765),slug)); return
     if a.cmd=="delete":
@@ -474,9 +536,9 @@ def cli():
     if a.cmd=="url": print(external_url(config().get('port',8765))); return
     if a.cmd=="install-service":
         selected=choose_port(a.port)
-        save(CONFIG,{"port":selected}); unit=Path.home()/".config/systemd/user/codex-pages.service"; unit.parent.mkdir(parents=True,exist_ok=True)
-        unit.write_text(f"[Unit]\nDescription=Codex Pages\nAfter=network-online.target\n\n[Service]\nExecStart={sys.executable} {ROOT/'portal.py'} run\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n")
-        subprocess.run(["systemctl","--user","daemon-reload"],check=True); subprocess.run(["systemctl","--user","enable","--now","codex-pages.service"],check=True)
+        save(CONFIG,{"port":selected}); unit=Path.home()/".config/systemd/user/pages.service"; unit.parent.mkdir(parents=True,exist_ok=True)
+        unit.write_text(f"[Unit]\nDescription=Pages\nAfter=network-online.target\n\n[Service]\nExecStart={sys.executable} {ROOT/'portal.py'} run\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n")
+        subprocess.run(["systemctl","--user","daemon-reload"],check=True); subprocess.run(["systemctl","--user","enable","--now","pages.service"],check=True)
         print("服务已启动："+external_url(selected)); return
     if a.cmd=="run":
         port=config().get("port",8765); print("Serving "+external_url(port)); App(("::",port),Handler).serve_forever()
